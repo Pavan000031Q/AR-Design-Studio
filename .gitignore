@@ -1,0 +1,34 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Debug artifacts
+debug_hitbox.png
+
+# Temporary files
+to_delete.txt
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Gemini agent data
+.gemini/
