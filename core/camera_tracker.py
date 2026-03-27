@@ -320,6 +320,14 @@ class CameraTracker:
         self._consecutive_tracking_frames = 0
         self._init_frame_count = 0
         
+        # Translation tracking
+        self._translation_detected = False
+        self._scale_factor = assumed_height  # Scale factor for monocular translation estimation
+        
+        # Inertia tracking (for smooth transitions)
+        self.last_q_delta = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        self.inertia_frames = 0
+        
         
         # CUDA optical flow object
         self._cuda_optflow = None
@@ -484,162 +492,7 @@ class CameraTracker:
             self.state = TrackingState.TRACKING
             print("🔄 Tracker: Re-initializing from lost state...")
     
-    # ──────────────────────────────────────────────────────────
-    # OPTICAL FLOW
-    # ──────────────────────────────────────────────────────────
-    
-    def _detect_features(self, gray, mask=None):
-        """Detect and refine Shi-Tomasi corners."""
-        points = cv2.goodFeaturesToTrack(gray, mask=mask, **self.feature_params)
-        if points is not None:
-            # Sub-pixel refinement for pin-point accuracy
-            points = cv2.cornerSubPix(gray, points, **self.subpixel_params)
-            points = points.reshape(-1, 2).astype(np.float32)
-        return points
-    
-    def _track_optical_flow(self, prev_gray, cur_gray, prev_points):
-        """
-        Track features from prev frame to current using Lucas-Kanade optical flow.
-        Returns (matched_prev, matched_cur, status) or (None, None, None) on failure.
-        """
-        if prev_points is None or len(prev_points) < 5:
-            return None, None, None
-        
-        pts_prev = prev_points.reshape(-1, 1, 2).astype(np.float32)
-        
-        if self._cuda_optflow is not None:
-            # GPU optical flow
-            try:
-                gpu_prev = cv2.cuda_GpuMat(prev_gray)
-                gpu_cur = cv2.cuda_GpuMat(cur_gray)
-                gpu_pts = cv2.cuda_GpuMat(pts_prev)
-                
-                gpu_next_pts, gpu_status, _ = self._cuda_optflow.calc(
-                    gpu_prev, gpu_cur, gpu_pts, None
-                )
-                
-                next_pts = gpu_next_pts.download()
-                status = gpu_status.download()
-            except Exception:
-                # Fallback to CPU
-                next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                    prev_gray, cur_gray, pts_prev, None, **self.lk_params
-                )
-        else:
-            # CPU optical flow
-            next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                prev_gray, cur_gray, pts_prev, None, **self.lk_params
-            )
-        
-        if next_pts is None or status is None:
-            return None, None, None
-        
-        # Forward-backward consistency check for robustness
-        back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
-            cur_gray, prev_gray, next_pts, None, **self.lk_params
-        )
-        
-        if back_pts is None:
-            return None, None, None
-        
-        # Compute forward-backward error
-        fb_error = np.linalg.norm(
-            pts_prev.reshape(-1, 2) - back_pts.reshape(-1, 2), axis=1
-        )
-        
-        # Keep only good tracks (status OK + low FB error + within frame bounds)
-        status = status.ravel()
-        if back_status is not None:
-            status = status & back_status.ravel()
-        
-        good = (status == 1) & (fb_error < 2.0)
-        
-        # Bounds check
-        next_pts_flat = next_pts.reshape(-1, 2)
-        in_bounds = (
-            (next_pts_flat[:, 0] >= 0) & (next_pts_flat[:, 0] < self.proc_w) &
-            (next_pts_flat[:, 1] >= 0) & (next_pts_flat[:, 1] < self.proc_h)
-        )
-        good = good & in_bounds
-        
-        return pts_prev[good], next_pts_flat[good], status[good]
 
-    def _estimate_rotation(self, points1, points2):
-        """Estimate 3x3 rotation matrix using Homography decomposition."""
-        if len(points1) < self.min_homography_inliers:
-            return None
-            
-        # Find Homography (RANSAC)
-        H, mask = cv2.findHomography(points1, points2, cv2.RANSAC, 3.0)
-        
-        if H is None:
-            return None
-        
-        # Determine inlier count
-        inliers = np.sum(mask.ravel())
-        if inliers < self.min_homography_inliers:
-            return None
-            
-        # Decompose homography to get rotation
-        # Assumption: Pure rotation about camera center (t=0)
-        # H = K * R * K_inv
-        # R = K_inv * H * K
-        
-        R_maybe = self.K_inv @ H @ self.K
-        
-        # Force it to be a valid rotation matrix (SVD)
-        U, S, Vt = np.linalg.svd(R_maybe)
-        R = U @ Vt
-        
-        if np.linalg.det(R) < 0:
-            R = -R
-            
-        # Check angle magnitude to reject bad solutions
-        trace = np.trace(R)
-        # Safe acos
-        angle_rad = np.arccos(np.clip((trace - 1) / 2, -1.0, 1.0))
-        angle_deg = np.degrees(angle_rad)
-        
-        if angle_deg > self.max_rotation_per_frame_deg:
-            return None
-            
-        return R
-
-
-    def _update_view_matrix(self):
-        """Convert current R, t to 4x4 OpenGL View Matrix."""
-        # World to Camera transform
-        # View Matrix = [ R.T  | -R.T * t ]
-        #               [ 0    |     1    ]
-        
-        # However, for AR, we usually want ModelView. 
-        # pyrr.Matrix44.look_at creates a VIEW matrix (Camera to World inverse).
-        
-        # Let's construct a Camera-to-World matrix, then invert it.
-        # CamPose = [ R  t ]
-        #           [ 0  1 ]
-        
-        # Create 4x4
-        M = np.eye(4, dtype=np.float32)
-        M[:3, :3] = self.R_current
-        M[:3, 3] = self.t_current.flatten()
-        
-        # Convert to View Matrix (Inverse of Camera Pose)
-        # But wait, we accumulated R as World->Camera? No, R_current represents
-        # Rotation of Camera in World Frame (if we accumulating q * q_delta).
-        # Actually tracked_prev -> tracked_cur gives R that transforms vectors 
-        # FROM t-1 TO t. (Frame t-1 = R * Frame t).
-        # So we are tracking Camera Pose.
-        
-        # OpenGL expects GL_MODELVIEW. 
-        # If we have Camera Pose (C_w), View Matrix is C_w^-1.
-        
-        valid_matrix = np.eye(4, dtype=np.float32)
-        valid_matrix[:3, :3] = self.R_current
-        valid_matrix[:3, 3] = self.t_current.flatten()
-        
-        # Invert to get View Matrix
-        self.view_matrix = np.linalg.inv(valid_matrix).T # Transpose for pyrr/OpenGL
     
     # ──────────────────────────────────────────────────────────
     # OPTICAL FLOW

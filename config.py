@@ -4,15 +4,15 @@ OPTIMIZED FOR GESTURE ACCURACY
 """
 
 # === CAMERA SETTINGS ===
-CAMERA_INDEX_HAND = 1   # Laptop Webcam (Hand Tracking)
-CAMERA_INDEX_WORLD = 0  # Mobile Camera (AR World)
-CAMERA_BACKEND = 1400  # cv2.CAP_MSMF for Windows (Better MJPG support)
+CAMERA_INDEX_HAND = 0   # Laptop Webcam (Hand Tracking)
+CAMERA_INDEX_WORLD = 1  # Mobile Camera (AR World)
+CAMERA_BACKEND = 700   # cv2.CAP_DSHOW for Windows (Allows Native 1080p and eliminates auto-compression)
 
 # Resolutions
 FRAME_WIDTH = 1920     # World Camera (High Quality)
 FRAME_HEIGHT = 1080
-HAND_CAM_WIDTH = 1920   # Hand Camera (Optimized for Speed)
-HAND_CAM_HEIGHT = 1080
+HAND_CAM_WIDTH = 640   # Hand Camera (Optimized for Speed)
+HAND_CAM_HEIGHT = 480
 
 CAMERA_FOV = 60.0  # Field of View for 3D Projection
 MIRROR_FRAME = True
@@ -38,12 +38,15 @@ POINTER_COLOR = (0, 255, 0)
 POINTER_SIZE = 10
 MENU_COLOR = (30, 30, 30)
 
+# === OBJECT SCALING ===
+TARGET_OBJECT_SIZE = 120.0  # Desired world-unit size for the largest axis of any model
+
 # === GRID & SNAPPING SETTINGS ===
 GRID_SIZE = 50.0       # Snap objects to 50 unit increments if enabled
 MAGNETIC_BORDER_PX = 40  # Snap to screen edges within 40px
 
 # === SLAM / TRACKING SETTINGS ===
-SLAM_ENABLED = False   # Disabled as per user request
+SLAM_ENABLED = False    # Set to False to disable SLAM tracking
 SLAM_ORB_FEATURES = 1500
 SLAM_MATCH_RATIO = 0.8
 SLAM_REPROJ_THRESHOLD = 2.0

@@ -222,7 +222,7 @@ class AppleGlassMenu:
             MenuItem("windows", "Windows"),
             MenuItem("lighting", "Lighting"),
             MenuItem("decor", "Decorations",),
-            MenuItem("flooring", "Flooring"),
+            MenuItem("Completed Models", "Completed Models"),
             MenuItem("colors", "Colors"),
 
         ]
@@ -240,7 +240,7 @@ class AppleGlassMenu:
                 ItemCard("chair_1", "Chair", "furniture", mesh_type="furniture_mesh", model_path="chair"),
                 ItemCard("table_1", "Coffee Table", "furniture", mesh_type="furniture_mesh", model_path="table"),
                 ItemCard("bed_1", "King Bed", "furniture", mesh_type="furniture_mesh", model_path="bed"),
-                ItemCard("car_1", "Cartoon Car", "furniture", mesh_type="glb", model_path="assets/models/Floor/Floor_Concrete.obj"),
+                ItemCard("car_1", "Cartoon Car", "furniture", mesh_type="glb", model_path="assets/models/cartoon_car.glb"),
             ],
             "doors": [
                 ItemCard("door_1", "Door", "doors", mesh_type="furniture_mesh", model_path="door"),
@@ -255,9 +255,11 @@ class AppleGlassMenu:
                 ItemCard("shelf_1", "Bookshelf", "decor", mesh_type="furniture_mesh", model_path="shelf"),
                 ItemCard("plant_1", "Plant Pot", "decor", mesh_type="pyramid"),
             ],
-            "flooring": [
-                ItemCard("floor_1", "Concrete Floor", "flooring", mesh_type="cube"),
-                ItemCard("floor_2", "Wood Floor", "flooring", mesh_type="cube"),
+            "Completed Models": [
+                ItemCard("cottage_1", "Cottage", "Completed Models", mesh_type="furniture_mesh", model_path="assets/models/cottage_obj.obj"),
+                ItemCard("floor_1", "Concrete Floor", "Completed Models", mesh_type="furniture_mesh", model_path="assets/models/Floor/Floor_Concrete.obj"),
+                ItemCard("wall_base_1", "Wall Base", "Completed Models", mesh_type="furniture_mesh", model_path="assets/models/walls/Wall_Base.obj"),
+                ItemCard("car_2", "Cartoon Car", "Completed Models", mesh_type="glb", model_path="assets/models/cartoon_car.glb"),
             ],
 
         }
@@ -453,7 +455,15 @@ class AppleGlassMenu:
                     mat_id, _, _, mat_color = group
                 obj.materials[mat_id] = mat_color
         
-        obj.scale = np.array([120.0, 120.0, 120.0])
+        # Auto-scale: normalize largest bbox axis to TARGET_OBJECT_SIZE
+        from config import TARGET_OBJECT_SIZE
+        bbox_extent = mesh.bbox_max - mesh.bbox_min
+        max_extent = float(np.max(bbox_extent))
+        if max_extent > 1e-6:
+            uniform_scale = TARGET_OBJECT_SIZE / max_extent
+        else:
+            uniform_scale = TARGET_OBJECT_SIZE  # degenerate mesh fallback
+        obj.scale = np.array([uniform_scale, uniform_scale, uniform_scale])
         # Fix: Rotate 180 degrees to face the camera (which looks down +Z)
         # Also apply Camera Pose if available to spawn in front of user
         
@@ -890,6 +900,29 @@ class AppleGlassMenu:
         
         # ── 1. MOVE HELD OBJECT ──
         if self.held_object:
+            # ✅ CHECK RELEASE FIRST — place at LAST KNOWN position, not current pointer
+            # This prevents teleporting when the pointer jumps on the release frame
+            if not is_fist and not is_pinching:
+                # Re-add to list at its CURRENT (last-frame) position
+                self.placed_objects.append(self.held_object)
+                print(f"📍 Placed 3D: {self.held_object.name} at {self.held_object.position}")
+                
+                # AUTO-LOCK: If snapped, create constraint
+                if self._last_snap_info is not None:
+                    _, snap_type, face_a, face_b, snap_other = self._last_snap_info
+                    if snap_other is not None:
+                        gid = self.constraint_manager.create_snap_lock(
+                            self.held_object, snap_other, face_a, face_b,
+                            all_objects=self.placed_objects
+                        )
+                        print(f"🧲 Auto-locked {self.held_object.name} ↔ {snap_other.name} ({snap_type}, Group {gid})")
+                
+                self._last_snap_info = None
+                self.held_object = None
+                self.holding_hand_id = -1
+                return
+            
+            # Still holding — update position
             f = self._focal_length()
             cx, cy = self.screen_width / 2, self.screen_height / 2
             
@@ -931,12 +964,15 @@ class AppleGlassMenu:
                 z_depth = new_pos[2]
             else:
                 # === AR MODE: Simple screen-to-world ===
-                z_depth = self.held_object.position[2]
-                if z_depth < 100: z_depth = 500.0
+                # Objects are at negative z (e.g. -500 = in front of camera)
+                # Use absolute depth for projection math, keep original z for position
+                z_depth = self.held_object.position[2]  # preserve original z
+                proj_depth = abs(z_depth)
+                if proj_depth < 100: proj_depth = 500.0  # Fallback for near-zero depth
                 
-                # Proposed position
-                new_x = (px - cx) * z_depth / f
-                new_y = (py - cy) * z_depth / f
+                # Proposed position (use positive proj_depth for correct direction)
+                new_x = (px - cx) * proj_depth / f
+                new_y = (py - cy) * proj_depth / f
             
             # --- GRID SNAP ---
             if self.settings.get('grid_snap', False):
@@ -945,12 +981,13 @@ class AppleGlassMenu:
                 z_depth = round(z_depth / GRID_SIZE) * GRID_SIZE
             
             # --- MAGNETIC BORDER SNAP ---
-            # Calculate world limits at this depth
-            world_w = (self.screen_width / 2) * z_depth / f
-            world_h = (self.screen_height / 2) * z_depth / f
+            # Calculate world limits at this depth (use absolute depth for correct snap bounds)
+            snap_depth = abs(z_depth) if abs(z_depth) >= 100 else 500.0
+            world_w = (self.screen_width / 2) * snap_depth / f
+            world_h = (self.screen_height / 2) * snap_depth / f
             
             # Convert border threshold from pixels to world units at this depth
-            border_thresh_world = MAGNETIC_BORDER_PX * (z_depth / f)
+            border_thresh_world = MAGNETIC_BORDER_PX * (snap_depth / f)
             
             # Snap to left/right
             if abs(new_x - (-world_w)) < border_thresh_world: new_x = -world_w
@@ -959,6 +996,18 @@ class AppleGlassMenu:
             # Snap to top/bottom
             if abs(new_y - (-world_h)) < border_thresh_world: new_y = -world_h
             elif abs(new_y - world_h) < border_thresh_world: new_y = world_h
+            
+            # ✅ PER-FRAME JUMP CAP — prevent teleporting from pointer glitches
+            MAX_MOVE_PER_FRAME = 150.0  # world units
+            move_vec = np.array([new_x - self.held_object.position[0],
+                                 new_y - self.held_object.position[1],
+                                 z_depth - self.held_object.position[2]], dtype=np.float32)
+            move_mag = np.linalg.norm(move_vec)
+            if move_mag > MAX_MOVE_PER_FRAME:
+                move_vec = move_vec / move_mag * MAX_MOVE_PER_FRAME
+                new_x = self.held_object.position[0] + move_vec[0]
+                new_y = self.held_object.position[1] + move_vec[1]
+                z_depth = self.held_object.position[2] + move_vec[2]
             
             # --- AUTO SNAP LOGIC (Face-Priority) ---
             delta_pos = np.array([new_x - self.held_object.position[0],
@@ -983,25 +1032,6 @@ class AppleGlassMenu:
             
             # Move Group Mates via ConstraintManager (Matrix Update)
             self.constraint_manager.update_children_transforms(self.held_object, self.placed_objects)
-                        
-            if not is_fist and not is_pinching:
-                # Re-add to list
-                self.placed_objects.append(self.held_object)
-                print(f"📍 Placed 3D: {self.held_object.name} at {self.held_object.position}")
-                
-                # AUTO-LOCK: If snapped, create constraint
-                if self._last_snap_info is not None:
-                    _, snap_type, face_a, face_b, snap_other = self._last_snap_info
-                    if snap_other is not None:
-                        gid = self.constraint_manager.create_snap_lock(
-                            self.held_object, snap_other, face_a, face_b,
-                            all_objects=self.placed_objects
-                        )
-                        print(f"🧲 Auto-locked {self.held_object.name} ↔ {snap_other.name} ({snap_type}, Group {gid})")
-                
-                self._last_snap_info = None
-                self.held_object = None
-                self.holding_hand_id = -1
             return
         
         # ── 2. PINCH STATE TRACKING ──
@@ -1149,6 +1179,19 @@ class AppleGlassMenu:
                         self.manipulation_start_y = py
                         self.initial_rotation_y = obj.rotation[1]
                         self.initial_rotation_x = obj.rotation[0]
+                        self._last_rotation_px = px
+                        self._last_rotation_py = py
+                    
+                    # ✅ JUMP DETECTION — if pointer jumps too far, reset baseline
+                    frame_jump = np.hypot(px - self._last_rotation_px, py - self._last_rotation_py)
+                    if frame_jump > 100:
+                        # Reset baseline to current position to absorb the jump
+                        self.manipulation_start_x = px
+                        self.manipulation_start_y = py
+                        self.initial_rotation_y = obj.rotation[1]
+                        self.initial_rotation_x = obj.rotation[0]
+                    self._last_rotation_px = px
+                    self._last_rotation_py = py
                     
                     delta_x = px - self.manipulation_start_x
                     delta_y = py - self.manipulation_start_y
@@ -1203,6 +1246,7 @@ class AppleGlassMenu:
                             del self.constraint_manager.groups[group.group_id]
                         print(f"🗑️ Deleted locked group ({len(group_objs)} objects)")
                     else:
+                        self.placed_objects.remove(obj)
                         print(f"🗑️ Deleted object: {obj.name}")
                         
                     self.selected_object_index = -1

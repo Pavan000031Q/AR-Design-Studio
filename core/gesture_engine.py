@@ -21,6 +21,27 @@ class TemporalFilter:
             self.history.pop(0)
         return all(self.history)
 
+class HysteresisFilter:
+    """Requires multiple consecutive frames to switch state in EITHER direction.
+    on_frames: consecutive True frames needed to go False→True
+    off_frames: consecutive False frames needed to go True→False (sticky hold)"""
+    def __init__(self, on_frames=2, off_frames=4):
+        self.on_frames = on_frames
+        self.off_frames = off_frames
+        self.state = False
+        self.counter = 0
+    
+    def update(self, raw):
+        if raw == self.state:
+            self.counter = 0
+            return self.state
+        self.counter += 1
+        threshold = self.on_frames if raw else self.off_frames
+        if self.counter >= threshold:
+            self.state = raw
+            self.counter = 0
+        return self.state
+
 class GestureStateMachine:
     def __init__(self):
         self.state = "NONE"
@@ -94,11 +115,10 @@ class GestureEngine:
         
         # Hysteresis Thresholds
         # START pinch only when very close
-        pinch_start_thresh = hand_size * 0.20  # Relaxed from 0.08 (was too tight)
-        # RELEASE pinch only when fingers move apart significantly
-        pinch_release_thresh = hand_size * 0.18 # Relaxed from 0.15
+        pinch_start_thresh = hand_size * 0.22
+        # RELEASE pinch only when fingers move apart significantly (MUST be > start for proper hysteresis)
+        pinch_release_thresh = hand_size * 0.30
 
-        
         # Debug
         self.pinch_threshold = pinch_start_thresh
         
@@ -113,8 +133,7 @@ class GestureEngine:
         # State Machine
         self.state_machine.update(filtered_pinch)
         
-        # 2. Fist Detection (Simplified)
-        # Check if all fingertips are close to palm/wrist
+        # 2. Fist Detection (with thumb check and temporal filtering)
         fingers_curled = 0
         tips = [8, 12, 16, 20] # Index, Middle, Ring, Pinky
         pips = [6, 10, 14, 18] # PIP joints
@@ -128,7 +147,20 @@ class GestureEngine:
                 if d_tip < d_pip: # Tip closer than PIP = curled
                     fingers_curled += 1
         
-        self.is_fist = (fingers_curled >= 4)
+        # Also check thumb curl (thumb tip closer to wrist than thumb IP joint)
+        thumb_curled = False
+        if 4 in lm_dict and 2 in lm_dict:
+            d_thumb_tip = np.hypot(lm_dict[4]['x'] - self.wrist['x'], lm_dict[4]['y'] - self.wrist['y'])
+            d_thumb_ip = np.hypot(lm_dict[2]['x'] - self.wrist['x'], lm_dict[2]['y'] - self.wrist['y'])
+            thumb_curled = d_thumb_tip < d_thumb_ip
+        
+        # Fist = all 4 fingers curled (original), OR 3 fingers + thumb curled (catches partial fists)
+        raw_fist = (fingers_curled >= 4) or (fingers_curled >= 3 and thumb_curled)
+        
+        # Hysteresis filter: 2 frames to activate fist, 4 frames to deactivate (sticky hold)
+        if not hasattr(self, '_fist_filter'):
+            self._fist_filter = HysteresisFilter(on_frames=2, off_frames=4)
+        self.is_fist = self._fist_filter.update(raw_fist)
         
         return {
             'state': self.state_machine.get_state_name(),

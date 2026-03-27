@@ -12,6 +12,17 @@ from utils.helper import FPSCounter, ThreadedCamera
 from config import *
 import time
 import sys
+import ctypes
+
+# Prevent Windows from applying low-resolution display scaling to the OpenCV window
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1) # 1 = PROCESS_SYSTEM_DPI_AWARE
+    # or ctypes.windll.user32.SetProcessDPIAware() for older Windows
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 from ui.menu_system import AppleGlassMenu, MenuState
 from ui.menu_renderer import draw_menu, draw_placed_objects_and_held, draw_color_palette
@@ -167,9 +178,7 @@ def main():
 
     # World Camera (Mobile / AR View) - Optimized for high frame rate
     # Use a temporary capture to check if the camera exists
-    temp_cap = cv2.VideoCapture(CAMERA_INDEX_WORLD, CAMERA_BACKEND)
-    using_dual_camera = temp_cap.isOpened()
-    temp_cap.release()
+    using_dual_camera = False # Forced Single Camera Mode
     
     if using_dual_camera:
         print(f"âœ… World Camera (Index {CAMERA_INDEX_WORLD}) found! Starting 60FPS thread...")
@@ -361,8 +370,6 @@ def main():
                 [0.0,  0.0,  1.0, 0.0],
                 [0.0,  0.0,  0.0, 1.0]
             ], dtype=np.float32)
-            camera_pose = (np.eye(3, dtype=np.float32), np.zeros((3, 1), dtype=np.float32))
-            tracking_state = TrackingState.TRACKING
             camera_pose = (np.eye(3, dtype=np.float32), np.zeros((3, 1), dtype=np.float32))
             tracking_state = TrackingState.TRACKING
             
@@ -694,11 +701,11 @@ def main():
 
         if show_debug:
             h, w = frame.shape[:2]
-            y_pos = 30
+            y_pos = h - 250
             line_height = 28
             
             overlay = frame.copy()
-            cv2.rectangle(overlay, (5, 5), (450, 280), (0, 0, 0), -1)
+            cv2.rectangle(overlay, (5, h - 280), (450, h - 5), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
             
             cv2.putText(frame, f"Menu: {ar_menu.state.name}", (15, y_pos),
@@ -725,43 +732,8 @@ def main():
                     print("ðŸ“– Menu toggled via pinch")
                     # No continue here, let other checks run if needed (though toggling usually consumes input)
                 
-            # 4. Object Toolbar (Delete & Duplicate)
-            if ar_menu.selected_object_index != -1:
-                # Button Size
-                btn_sz = ar_menu.minimized_button_size + 10
-                
-                # DELETE
-                dx, dy = ar_menu.get_delete_button_position()
-                if (dx <= action_x <= dx + btn_sz and dy <= action_y <= dy + btn_sz):
-                    if time.time() - last_click_time > CLICK_COOLDOWN:
-                        print(f"ðŸ—‘ï¸ Deleted object {ar_menu.selected_object_index}")
-                        del ar_menu.placed_objects[ar_menu.selected_object_index]
-                        ar_menu.selected_object_index = -1
-                        last_click_time = time.time()
-                
-                # DUPLICATE
-                # Check duplicate INDEPENDENTLY of delete
-                if ar_menu.selected_object_index != -1: # Double check in case just deleted
-                    dup_x, dup_y = ar_menu.get_duplicate_button_position()
-                    # print(f"Checking Dup: {action_x},{action_y} vs {dup_x},{dup_y}") # DEBUG
-                    if (dup_x <= action_x <= dup_x + btn_sz and dup_y <= action_y <= dup_y + btn_sz):
-                         print("ðŸŸ¢ Duplicate Button Clicked!") 
-                         if time.time() - last_click_time > CLICK_COOLDOWN:
-                             # Clone
-                             orig_obj = ar_menu.placed_objects[ar_menu.selected_object_index]
-                             new_obj = orig_obj.clone()
-                             
-                             # Offset slightly so it's not directly inside
-                             new_obj.position += np.array([20, 0, 20], dtype=np.float32)
-                             
-                             ar_menu.placed_objects.append(new_obj)
-                             
-                             # Select the new object
-                             ar_menu.selected_object_index = len(ar_menu.placed_objects) - 1
-                             print(f"ðŸ‘¯ Duplicated object! New count: {len(ar_menu.placed_objects)}")
-                             
-                             last_click_time = time.time()
-            
+            # Object toolbar (Delete & Duplicate) is handled by ar_menu.update() in menu_system.py
+            # Do NOT duplicate that logic here to avoid race conditions
             # 2. Settings Button (Floating)
             set_x, set_y = ar_menu.get_settings_button_position()
             btn_sz = ar_menu.minimized_button_size + 10
@@ -842,20 +814,6 @@ def main():
                      obj.draw_hitbox_debug(frame, FRAME_WIDTH, FRAME_HEIGHT, 
                                           camera_tracker.K[0,0], # Focal length from K matrix
                                           view_matrix=view_matrix)
-             if ar_menu:
-                # ar_menu.update expects single hand data. Loop through hands.
-                for hs in hand_states:
-                    # Inject global gesture data (like hand_distance for zoom)
-                    hs['hand_distance'] = gesture_data.get('hand_distance', 0)
-                    hs['hand_count'] = gesture_data.get('hand_count', 0)
-                    ar_menu.update(hs['x'], hs['y'], hs, view_matrix=view_matrix)
-                
-                # If no hands, update once to handle animations/timers?
-                if not hand_states:
-                    # Pass dummy data to keep animations running
-                    dummy_gesture = {'hand_detected': False, 'state': 'NONE'}
-                    ar_menu.update(0, 0, dummy_gesture, view_matrix=view_matrix)
-                     
              # Draw Held Object Hitbox
              if ar_menu.held_object:
                  ar_menu.held_object.draw_hitbox_debug(frame, FRAME_WIDTH, FRAME_HEIGHT, 
